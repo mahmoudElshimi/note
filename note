@@ -1,0 +1,600 @@
+#!/usr/bin/env  bash
+
+# MIT/X Consortium License
+# © 2025 mahmoudElShimi <mahmoudelshimi@protonmail.ch>
+# https://github.com/mahmoudElshimi/note
+# Modified pass-like note manager with optional encryption
+
+umask "${PASSWORD_STORE_UMASK:-077}"
+set -o pipefail
+
+PREFIX="${PASSWORD_STORE_DIR:-$HOME/.note-store}"
+EXTENSIONS="${PASSWORD_STORE_EXTENSIONS_DIR:-$PREFIX/.extensions}"
+X_SELECTION="${PASSWORD_STORE_X_SELECTION:-clipboard}"
+CLIP_TIME="${PASSWORD_STORE_CLIP_TIME:-45}"
+
+unset GIT_DIR GIT_WORK_TREE GIT_NAMESPACE GIT_INDEX_FILE GIT_INDEX_VERSION GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
+export GIT_CEILING_DIRECTORIES="$PREFIX/.."
+
+#
+# BEGIN helper functions
+#
+
+set_git() {
+	INNER_GIT_DIR="${1%/*}"
+	while [[ ! -d $INNER_GIT_DIR && ${INNER_GIT_DIR%/*}/ == "${PREFIX%/}/"* ]]; do
+		INNER_GIT_DIR="${INNER_GIT_DIR%/*}"
+	done
+	[[ $(git -C "$INNER_GIT_DIR" rev-parse --is-inside-work-tree 2>/dev/null) == true ]] || INNER_GIT_DIR=""
+}
+git_add_file() {
+	[[ -n $INNER_GIT_DIR ]] || return
+	git -C "$INNER_GIT_DIR" add "$1" || return
+	[[ -n $(git -C "$INNER_GIT_DIR" status --porcelain "$1") ]] || return
+	git_commit "$2"
+}
+git_commit() {
+	local sign=""
+	[[ -n $INNER_GIT_DIR ]] || return
+	[[ $(git -C "$INNER_GIT_DIR" config --bool --get pass.signcommits) == "true" ]] && sign="-S"
+	git -C "$INNER_GIT_DIR" commit $sign -m "$1"
+}
+yesno() {
+	[[ -t 0 ]] || return 0
+	local response
+	read -r -p "$1 [y/N] " response
+	[[ $response == [yY] ]] || exit 1
+}
+die() {
+	echo "$@" >&2
+	exit 1
+}
+check_sneaky_paths() {
+	local path
+	for path in "$@"; do
+		[[ $path =~ /\.\.$ || $path =~ ^\.\./ || $path =~ /\.\./ || $path =~ ^\.\.$ ]] && die "Error: You've attempted to pass a sneaky path to pass. Go home."
+	done
+}
+
+#
+# END helper functions
+#
+
+#
+# BEGIN platform definable
+#
+
+clip() {
+	if [[ -n $WAYLAND_DISPLAY ]]; then
+		local copy_cmd=( wl-copy )
+		local paste_cmd=( wl-paste -n )
+		if [[ $X_SELECTION == primary ]]; then
+			copy_cmd+=( --primary )
+			paste_cmd+=( --primary )
+		fi
+		local display_name="$WAYLAND_DISPLAY"
+	elif [[ -n $DISPLAY ]]; then
+		local copy_cmd=( xclip -selection "$X_SELECTION" )
+		local paste_cmd=( xclip -o -selection "$X_SELECTION" )
+		local display_name="$DISPLAY"
+	else
+		die "Error: No X11 or Wayland display detected"
+	fi
+	local sleep_argv0="password store sleep on display $display_name"
+
+	pkill -f "^$sleep_argv0" 2>/dev/null && sleep 0.5
+	local before="$("${paste_cmd[@]}" 2>/dev/null | base64)"
+	echo -n "$1" | "${copy_cmd[@]}" || die "Error: Could not copy data to the clipboard"
+	(
+		( exec -a "$sleep_argv0" bash <<<"trap 'kill %1' TERM; sleep '$CLIP_TIME' & wait" )
+		local now="$("${paste_cmd[@]}" | base64)"
+		[[ $now != $(echo -n "$1" | base64) ]] && before="$now"
+
+		qdbus org.kde.klipper /klipper org.kde.klipper.klipper.clearClipboardHistory &>/dev/null
+
+		echo "$before" | base64 -d | "${copy_cmd[@]}"
+	) >/dev/null 2>&1 & disown
+	echo "Copied $2 to clipboard. Will clear in $CLIP_TIME seconds."
+}
+
+qrcode() {
+	if [[ -n $DISPLAY || -n $WAYLAND_DISPLAY ]]; then
+		if type feh >/dev/null 2>&1; then
+			echo -n "$1" | qrencode --size 10 -o - | feh -x --title "pass: $2" -g +200+200 -
+			return
+		elif type gm >/dev/null 2>&1; then
+			echo -n "$1" | qrencode --size 10 -o - | gm display -title "pass: $2" -geometry +200+200 -
+			return
+		elif type display >/dev/null 2>&1; then
+			echo -n "$1" | qrencode --size 10 -o - | display -title "pass: $2" -geometry +200+200 -
+			return
+		fi
+	fi
+	echo -n "$1" | qrencode -t utf8
+}
+
+tmpdir() {
+	[[ -n $SECURE_TMPDIR ]] && return
+	local warn=1
+	[[ $1 == "nowarn" ]] && warn=0
+	local template="$PROGRAM.XXXXXXXXXXXXX"
+	if [[ -d /dev/shm && -w /dev/shm && -x /dev/shm ]]; then
+		SECURE_TMPDIR="$(mktemp -d "/dev/shm/$template")"
+		remove_tmpfile() {
+			rm -rf "$SECURE_TMPDIR"
+		}
+		trap remove_tmpfile EXIT
+	else
+		[[ $warn -eq 1 ]] && yesno "$(cat <<-_EOF
+		Your system does not have /dev/shm, which means that it may
+		be difficult to entirely erase the temporary non-encrypted
+		password file after editing.
+
+		Are you sure you would like to continue?
+		_EOF
+		)"
+		SECURE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/$template")"
+		shred_tmpfile() {
+			find "$SECURE_TMPDIR" -type f -exec shred -f -z {} +
+			rm -rf "$SECURE_TMPDIR"
+		}
+		trap shred_tmpfile EXIT
+	fi
+}
+
+GETOPT="getopt"
+SHRED="shred -f -z"
+BASE64="base64"
+
+#
+# END platform definable
+#
+
+
+#
+# BEGIN subcommand functions
+#
+
+cmd_version() {
+	cat <<-_EOF
+============================================
+=   note: the standard unix note manager   =
+=                                          =
+=                  v1.0.0                  =
+=                                          =
+=             Mahmoud ElShimi		   =
+=       mahmoudelshimi@protonmail.ch 	   =
+=                                          =
+=  https://github.com/mahmoudelshimi/note  =
+============================================
+
+	_EOF
+}
+
+cmd_usage() {
+	cmd_version
+	echo
+	cat <<-_EOF
+	Usage:
+	    $PROGRAM [ls] [subfolder]
+	        List notes.
+	    $PROGRAM find note-names...
+	    	List notes that match note-names.
+	    $PROGRAM [show] [--clip,-c] note-name
+	        Show existing note and optionally put it on the clipboard.
+	        If put on the clipboard, it will be cleared in $CLIP_TIME seconds.
+	    $PROGRAM grep [GREPOPTIONS] search-string
+	        Search for notes containing search-string.
+	    $PROGRAM insert [--multiline,-m] [--force,-f] [--encrypt,-e] note-name
+	        Insert new note. Optionally, the entry may be multiline. Prompt before
+	        overwriting existing note unless forced. Use -e to encrypt with passphrase.
+	    $PROGRAM edit [--encrypt,-e] note-name
+	        Edit an existing note using ${EDITOR:-vi}.
+	        Use -e to encrypt with passphrase.
+	    $PROGRAM rm [--recursive,-r] [--force,-f] note-name
+	        Remove existing note or directory, optionally forcefully.
+	    $PROGRAM mv [--force,-f] old-path new-path
+	        Renames or moves old-path to new-path, optionally forcefully.
+	    $PROGRAM cp [--force,-f] old-path new-path
+	        Copies old-path to new-path, optionally forcefully.
+	    $PROGRAM git git-command-args...
+	        If the note store is a git repository, execute a git command
+	        specified by git-command-args.
+	    $PROGRAM help
+	        Show this text.
+	    $PROGRAM version
+	        Show version information.
+	_EOF
+}
+
+cmd_init() {
+	echo "Initializing note store is not needed in this version."
+	echo "Just create notes with 'note insert'."
+}
+
+cmd_show() {
+	local opts clip=0
+	opts="$($GETOPT -o c -l clip -n "$PROGRAM" -- "$@")"
+	local err=$?
+	eval set -- "$opts"
+	while true; do case $1 in
+		-c|--clip) clip=1; shift ;;
+		--) shift; break ;;
+	esac done
+
+	[[ $err -ne 0 ]] && die "Usage: $PROGRAM $COMMAND [--clip,-c] [note-name]"
+
+	local path="$1"
+	local notefile="$PREFIX/$path"
+	check_sneaky_paths "$path"
+	
+	if [[ -f "${notefile}.gpg" ]]; then
+	    tmpdir
+	    local tmp_file="$(mktemp -u "$SECURE_TMPDIR/XXXXXX")"
+	    echo "Decrypting note..."
+	    if ! gpg -d --quiet --yes "${notefile}.gpg" > "$tmp_file"; then
+	        rm -f "$tmp_file"
+	        die "Error: Decryption failed."
+	    fi
+	    notefile="$tmp_file"
+	fi
+	
+	if [[ -f $notefile ]]; then
+		if [[ $clip -eq 0 ]]; then
+			cat "$notefile"
+		else
+			local note="$(cat "$notefile")"
+			[[ -n $note ]] || die "There is no note to put on the clipboard."
+			clip "$note" "$path"
+		fi
+		[[ -n $tmp_file ]] && rm -f "$tmp_file"
+	elif [[ -d $PREFIX/$path ]]; then
+		if [[ -z $path ]]; then
+			echo "Note Store"
+		else
+			echo "${path%\/}"
+		fi
+		tree -N -C -l --noreport "$PREFIX/$path" | tail -n +2 | sed -E 's/\.gpg(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
+	elif [[ -z $path ]]; then
+		die "Error: note store is empty."
+	else
+		die "Error: $path is not in the note store."
+	fi
+}
+
+cmd_find() {
+	[[ $# -eq 0 ]] && die "Usage: $PROGRAM $COMMAND note-names..."
+	IFS="," eval 'echo "Search Terms: $*"'
+	local terms="*$(printf '%s*|*' "$@")"
+	tree -N -C -l --noreport -P "${terms%|*}" --prune --matchdirs --ignore-case "$PREFIX" | tail -n +2 | sed -E 's/\.gpg(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
+}
+
+cmd_grep() {
+	[[ $# -lt 1 ]] && die "Usage: $PROGRAM $COMMAND [GREPOPTIONS] search-string"
+	local notefile grepresults
+	while read -r -d "" notefile; do
+	    local decrypted_file="$notefile"
+	    if [[ "$notefile" == *.gpg ]]; then
+	        tmpdir
+	        local tmp_file="$(mktemp -u "$SECURE_TMPDIR/XXXXXX")"
+	        echo "Decrypting ${notefile#$PREFIX/}..."
+	        if ! gpg -d --quiet --yes "$notefile" > "$tmp_file"; then
+	            rm -f "$tmp_file"
+	            echo "Error: Decryption failed for ${notefile#$PREFIX/}." >&2
+	            continue
+	        fi
+	        decrypted_file="$tmp_file"
+	    fi
+	    
+		grepresults="$(grep --color=always "$@" "$decrypted_file")"
+		[[ $? -ne 0 ]] && continue
+		notefile="${notefile#$PREFIX/}"
+		notefile="${notefile%.gpg}"
+		local notefile_dir="${notefile%/*}/"
+		[[ $notefile_dir == "${notefile}/" ]] && notefile_dir=""
+		notefile="${notefile##*/}"
+		printf "\e[94m%s\e[1m%s\e[0m:\n" "$notefile_dir" "$notefile"
+		echo "$grepresults"
+		[[ -n $tmp_file ]] && rm -f "$tmp_file"
+	done < <(find -L "$PREFIX" -path '*/.git' -prune -o \( -iname '*.gpg' -o -type f ! -name '.*' ! -name '*.sig' \) -print0)
+}
+
+cmd_insert() {
+	local opts multiline=0 force=0 encrypt=0
+	opts="$($GETOPT -o mfe -l multiline,force,encrypt -n "$PROGRAM" -- "$@")"
+	local err=$?
+	eval set -- "$opts"
+	while true; do case $1 in
+		-m|--multiline) multiline=1; shift ;;
+		-f|--force) force=1; shift ;;
+		-e|--encrypt) encrypt=1; shift ;;
+		--) shift; break ;;
+	esac done
+
+	[[ $err -ne 0 || $# -ne 1 ]] && die "Usage: $PROGRAM $COMMAND [--multiline,-m] [--force,-f] [--encrypt,-e] note-name"
+	local path="${1%/}"
+	local notefile="$PREFIX/$path"
+	check_sneaky_paths "$path"
+	set_git "$notefile"
+
+	[[ $force -eq 0 && ( -e $notefile || -e "${notefile}.gpg" ) ]] && yesno "An entry already exists for $path. Overwrite it?"
+
+	mkdir -p -v "$PREFIX/$(dirname -- "$path")"
+
+	if [[ $encrypt -eq 1 ]]; then
+	    local passphrase passphrase_again
+	    while true; do
+	        read -r -p "Enter encryption passphrase for $path: " -s passphrase || exit 1
+	        echo
+	        read -r -p "Retype encryption passphrase for $path: " -s passphrase_again || exit 1
+	        echo
+	        if [[ "$passphrase" == "$passphrase_again" ]]; then
+	            break
+	        else
+	            die "Error: the entered passphrases do not match."
+	        fi
+	    done
+	fi
+
+	if [[ $multiline -eq 1 ]]; then
+		echo "Enter note for $path and press Ctrl+D when finished:"
+		echo
+		tmpdir
+		local tmp_file="$(mktemp -u "$SECURE_TMPDIR/XXXXXX")"
+		cat > "$tmp_file" || die "Error writing note"
+		
+		if [[ $encrypt -eq 1 ]]; then
+		    if ! gpg --quiet --yes --batch -c --passphrase "$passphrase" -o "${notefile}.gpg" "$tmp_file"; then
+		        rm -f "$tmp_file" "${notefile}.gpg"
+		        die "Error: Encryption failed."
+		    fi
+		    rm -f "$tmp_file" "$notefile"
+		else
+		    mv "$tmp_file" "$notefile" || die "Error writing note"
+		    rm -f "${notefile}.gpg"
+		fi
+	else
+		echo "Enter note for $path:"
+		local note
+		read -r -e note
+		
+		if [[ $encrypt -eq 1 ]]; then
+		    if ! echo "$note" | gpg --quiet --yes --batch -c --passphrase "$passphrase" -o "${notefile}.gpg"; then
+		        rm -f "${notefile}.gpg"
+		        die "Error: Encryption failed."
+		    fi
+		    rm -f "$notefile"
+		else
+		    echo "$note" > "$notefile" || die "Error writing note"
+		    rm -f "${notefile}.gpg"
+		fi
+	fi
+	
+	git_add_file "$notefile" "Add given note for $path to store."
+}
+
+cmd_edit() {
+	local opts encrypt=0
+	opts="$($GETOPT -o e -l encrypt -n "$PROGRAM" -- "$@")"
+	local err=$?
+	eval set -- "$opts"
+	while true; do case $1 in
+		-e|--encrypt) encrypt=1; shift ;;
+		--) shift; break ;;
+	esac done
+
+	[[ $# -ne 1 ]] && die "Usage: $PROGRAM $COMMAND [--encrypt,-e] note-name"
+
+	local path="${1%/}"
+	check_sneaky_paths "$path"
+	mkdir -p -v "$PREFIX/$(dirname -- "$path")"
+	local notefile="$PREFIX/$path"
+	set_git "$notefile"
+
+	tmpdir
+	local tmp_file="$(mktemp -u "$SECURE_TMPDIR/XXXXXX")-${path//\//-}.txt"
+	local original_encrypted=0
+	
+	if [[ -f "${notefile}.gpg" ]]; then
+	    original_encrypted=1
+	    echo "Decrypting note..."
+	    if ! gpg -d --quiet --yes "${notefile}.gpg" > "$tmp_file"; then
+	        rm -f "$tmp_file"
+	        die "Error: Decryption failed."
+	    fi
+	elif [[ -f "$notefile" ]]; then
+	    cp "$notefile" "$tmp_file"
+	else
+	    touch "$tmp_file"
+	fi
+
+	local action="Add"
+	[[ -f "$notefile" || -f "${notefile}.gpg" ]] && action="Edit"
+	
+	${EDITOR:-vi} "$tmp_file"
+	[[ -f $tmp_file ]] || die "New note not saved."
+	
+	if [[ $original_encrypted -eq 1 || $encrypt -eq 1 ]]; then
+	    local passphrase passphrase_again
+	    while true; do
+	        read -r -p "Enter encryption passphrase for $path: " -s passphrase || exit 1
+	        echo
+	        read -r -p "Retype encryption passphrase for $path: " -s passphrase_again || exit 1
+	        echo
+	        if [[ "$passphrase" == "$passphrase_again" ]]; then
+	            if gpg --quiet --yes --batch -c --passphrase "$passphrase" -o "${notefile}.gpg" "$tmp_file"; then
+	                rm -f "$notefile" "$tmp_file"
+	                notefile="${notefile}.gpg"
+	                break
+	            else
+	                rm -f "${notefile}.gpg"
+	                die "Error: Encryption failed."
+	            fi
+	        else
+	            die "Error: Passphrases do not match."
+	        fi
+	    done
+	else
+	    if diff -q "$tmp_file" "$notefile" &>/dev/null && [[ -f "$notefile" ]]; then
+	        rm -f "$tmp_file"
+	        die "Note unchanged."
+	    fi
+	    mv "$tmp_file" "$notefile" || die "Could not write to $notefile"
+	    rm -f "${notefile}.gpg"
+	fi
+	
+	git_add_file "$notefile" "$action note for $path using ${EDITOR:-vi}."
+}
+
+
+cmd_delete() {
+    local opts recursive="" force=0
+    opts="$($GETOPT -o rf -l recursive,force -n "$PROGRAM" -- "$@")"
+    local err=$?
+    eval set -- "$opts"
+    while true; do case $1 in
+        -r|--recursive) recursive="-r"; shift ;;
+        -f|--force) force=1; shift ;;
+        --) shift; break ;;
+    esac done
+    [[ $# -ne 1 ]] && die "Usage: $PROGRAM $COMMAND [--recursive,-r] [--force,-f] note-name"
+    local path="$1"
+    check_sneaky_paths "$path"
+
+    local notedir="$PREFIX/${path%/}"
+    local notefile="$PREFIX/$path"
+    
+    # First check if the exact path exists (with or without .gpg)
+    if [[ ! -e "$notefile" && ! -e "${notefile}.gpg" ]]; then
+        # If not, check if it's a directory
+        if [[ ! -d "$notedir" ]]; then
+            die "Error: $path is not in the note store."
+        fi
+        notefile="${notedir%/}/"
+    fi
+
+    set_git "$notefile"
+
+    [[ $force -eq 1 ]] || yesno "Are you sure you would like to delete $path?"
+
+    # Remove both possible versions
+    rm $recursive -f -v "${notefile}" "${notefile}.gpg"
+    set_git "$notefile"
+    if [[ -n $INNER_GIT_DIR && ! -e $notefile && ! -e "${notefile}.gpg" ]]; then
+        git -C "$INNER_GIT_DIR" rm -qr "$notefile" "${notefile}.gpg" 2>/dev/null
+        set_git "$notefile"
+        git_commit "Remove $path from store."
+    fi
+    rmdir -p "${notefile%/*}" 2>/dev/null
+}
+
+cmd_copy_move() {
+	local opts move=1 force=0
+	[[ $1 == "copy" ]] && move=0
+	shift
+	opts="$($GETOPT -o f -l force -n "$PROGRAM" -- "$@")"
+	local err=$?
+	eval set -- "$opts"
+	while true; do case $1 in
+		-f|--force) force=1; shift ;;
+		--) shift; break ;;
+	esac done
+	[[ $# -ne 2 ]] && die "Usage: $PROGRAM $COMMAND [--force,-f] old-path new-path"
+	check_sneaky_paths "$@"
+	local old_path="$PREFIX/${1%/}"
+	local old_dir="$old_path"
+	local new_path="$PREFIX/$2"
+
+	if ! [[ -f $old_path && -d $old_path && $1 == */ || ! -f $old_path ]]; then
+		old_dir="${old_path%/*}"
+		old_path="${old_path}"
+	fi
+	[[ -e $old_path || -e "${old_path}.gpg" ]] || die "Error: $1 is not in the note store."
+
+	mkdir -p -v "${new_path%/*}"
+	[[ -d $old_path || -d $new_path || $new_path == */ ]] || new_path="${new_path}"
+
+	local interactive="-i"
+	[[ ! -t 0 || $force -eq 1 ]] && interactive="-f"
+
+	set_git "$new_path"
+	if [[ $move -eq 1 ]]; then
+		mv $interactive -v "$old_path" "$old_path.gpg" "$new_path" 2>/dev/null
+		if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
+			git -C "$INNER_GIT_DIR" rm -qr "$old_path" "$old_path.gpg" 2>/dev/null
+			set_git "$new_path"
+			git_add_file "$new_path" "Rename ${1} to ${2}."
+		fi
+		set_git "$old_path"
+		if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
+			git -C "$INNER_GIT_DIR" rm -qr "$old_path" "$old_path.gpg" 2>/dev/null
+			set_git "$old_path"
+			[[ -n $(git -C "$INNER_GIT_DIR" status --porcelain "$old_path") ]] && git_commit "Remove ${1}."
+		fi
+		rmdir -p "$old_dir" 2>/dev/null
+	else
+		cp $interactive -r -v "$old_path" "$new_path" 2>/dev/null
+		cp $interactive -r -v "${old_path}.gpg" "${new_path}.gpg" 2>/dev/null
+		git_add_file "$new_path" "Copy ${1} to ${2}."
+	fi
+}
+
+cmd_git() {
+	set_git "$PREFIX/"
+	if [[ -n $INNER_GIT_DIR ]]; then
+		tmpdir nowarn
+		export TMPDIR="$SECURE_TMPDIR"
+		git -C "$INNER_GIT_DIR" "$@"
+	else
+		die "Error: the note store is not a git repository."
+	fi
+}
+
+cmd_extension_or_show() {
+	if ! cmd_extension "$@"; then
+		COMMAND="show"
+		cmd_show "$@"
+	fi
+}
+
+SYSTEM_EXTENSION_DIR="/usr/lib/password-store/extensions"
+cmd_extension() {
+	check_sneaky_paths "$1"
+	local user_extension system_extension extension
+	[[ -n $SYSTEM_EXTENSION_DIR ]] && system_extension="$SYSTEM_EXTENSION_DIR/$1.bash"
+	[[ $PASSWORD_STORE_ENABLE_EXTENSIONS == true ]] && user_extension="$EXTENSIONS/$1.bash"
+	if [[ -n $user_extension && -f $user_extension && -x $user_extension ]]; then
+		extension="$user_extension"
+	elif [[ -n $system_extension && -f $system_extension && -x $system_extension ]]; then
+		extension="$system_extension"
+	else
+		return 1
+	fi
+	shift
+	source "$extension" "$@"
+	return 0
+}
+
+#
+# END subcommand functions
+#
+
+PROGRAM="${0##*/}"
+COMMAND="$1"
+
+case "$1" in
+	init) shift;		cmd_init "$@" ;;
+	help|--help) shift;	cmd_usage "$@" ;;
+	version|--version) shift; cmd_version "$@" ;;
+	show|ls|list) shift;	cmd_show "$@" ;;
+	find|search) shift;	cmd_find "$@" ;;
+	grep) shift;		cmd_grep "$@" ;;
+	insert|add) shift;	cmd_insert "$@" ;;
+	edit) shift;		cmd_edit "$@" ;;
+	delete|rm|remove) shift; cmd_delete "$@" ;;
+	rename|mv) shift;	cmd_copy_move "move" "$@" ;;
+	copy|cp) shift;		cmd_copy_move "copy" "$@" ;;
+	git) shift;		cmd_git "$@" ;;
+	*)			cmd_extension_or_show "$@" ;;
+esac
+exit 0
