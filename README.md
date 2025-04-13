@@ -1,4 +1,4 @@
-# Note - CLI Note Manager with Encryption
+# Note - Simple Unix CLI Note Manager with [Encryption]
 
 A lightweight, pass-inspired note management system with optional GPG encryption.
 
