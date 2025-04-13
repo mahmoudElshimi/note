@@ -19,7 +19,6 @@ chmod +x note/note
 cp note/note /path/to/your/path
 ```
 
-```
 
 ### Dependencies
 ```bash
@@ -145,5 +144,5 @@ install wl-clipboard
 
 ## License
 MIT/X License © 2025 mahmoudElShimi <mahmoudelshimi@protonmail.ch>
-```
+
 
