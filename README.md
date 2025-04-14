@@ -16,7 +16,7 @@ A lightweight, pass-inspired note management system with optional GPG encryption
 ```bash
 git clone https://github.com/mahmoudElshimi/note.git
 chmod +x note/note
-cp note/note /path/to/your/path
+cp note/note /to/your/path/
 ```
 
 
