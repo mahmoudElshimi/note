@@ -159,6 +159,7 @@ A dmenu-based interface for quickly finding and accessing notes from your termin
 ```bash
 chmod +x notemenu
 sudo cp notemenu /path/to/ur/path
+```
 
 ## License
 MIT/X License © 2025 mahmoudElShimi <mahmoudelshimi@protonmail.ch>
