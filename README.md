@@ -141,6 +141,24 @@ install xclip
 install wl-clipboard
 ```
 
+## notemenu - Quick Note Selection Interface
+
+### Description
+A dmenu-based interface for quickly finding and accessing notes from your terminal or window manager.
+
+### Features
+- Fuzzy-find notes with dmenu/rofi
+- Supports both X11 and Wayland
+- Two interaction modes:
+  - Copy to clipboard (default)
+  - Direct typing into focused window (`--type` flag)
+- Shows full note paths (e.g., "work/projects/backend")
+- Works with both encrypted (.gpg) and plain text notes
+
+### Installation
+```bash
+chmod +x notemenu
+sudo cp notemenu /path/to/ur/path
 
 ## License
 MIT/X License © 2025 mahmoudElShimi <mahmoudelshimi@protonmail.ch>

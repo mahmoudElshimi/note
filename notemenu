@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# MIT/X Consortium License
+# © 2025 mahmoudElshimi <mahmoudelshimi@protonmail.ch>
+# https://github.com/mahmoudElshimi/note
+
+shopt -s nullglob globstar
+
+typeit=0
+if [[ $1 == "--type" ]]; then
+        typeit=1
+        shift
+fi
+
+if [[ -n $WAYLAND_DISPLAY ]]; then
+        dmenu=dmenu-wl
+        xdotool="ydotool type --file -"
+elif [[ -n $DISPLAY ]]; then
+        dmenu=dmenu
+        xdotool="xdotool type --clearmodifiers --file -"
+else
+        echo "Error: No Wayland or X11 display detected" >&2
+        exit 1
+fi
+
+prefix=${NOTE_STORE_DIR-~/.note-store}
+
+# Find all files (both .gpg and regular files) excluding directories
+note_files=()
+while IFS= read -r -d $'\0' file; do
+    # Remove prefix and .gpg extension if present
+    file="${file#$prefix/}"
+    file="${file%.gpg}"
+    note_files+=("$file")
+done < <(find "$prefix" -type f \( -name "*.gpg" -o ! -name "*.*" \) -print0)
+
+note=$(printf '%s\n' "${note_files[@]}" | "$dmenu" "$@")
+
+[[ -n $note ]] || exit
+
+if [[ $typeit -eq 0 ]]; then
+        note show -c "$note" 2>/dev/null
+else
+        note show "$note" | { IFS= read -r content; printf %s "$content"; } | $xdotool
+fi
