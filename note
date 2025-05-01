@@ -121,7 +121,7 @@ tmpdir() {
 	if [[ -d /dev/shm && -w /dev/shm && -x /dev/shm ]]; then
 		SECURE_TMPDIR="$(mktemp -d "/dev/shm/$template")"
 		remove_tmpfile() {
-			rm -rf "$SECURE_TMPDIR"
+			wipe -RIsf "$SECURE_TMPDIR"
 		}
 		trap remove_tmpfile EXIT
 	else
@@ -136,7 +136,7 @@ tmpdir() {
 		SECURE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/$template")"
 		shred_tmpfile() {
 			find "$SECURE_TMPDIR" -type f -exec shred -f -z {} +
-			rm -rf "$SECURE_TMPDIR"
+			wipe -RIsf "$SECURE_TMPDIR"
 		}
 		trap shred_tmpfile EXIT
 	fi
