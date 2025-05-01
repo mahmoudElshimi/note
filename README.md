@@ -23,13 +23,13 @@ cp note/note /to/your/path/
 ### Dependencies
 ```bash
 # Arch Linux
-sudo pacman -S  bash  gnupg  tree git
+sudo pacman -S  bash  gnupg  tree git shred
 
 # Debian/Ubuntu
-sudo apt install tree gpg xclip git
+sudo apt install tree gpg xclip git shred
 
 # RHEL/CentOS
-sudo yum install tree gnupg xclip git
+sudo yum install tree gnupg xclip git shred
 ```
 
 ## Basic Usage
