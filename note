@@ -233,7 +233,7 @@ cmd_show() {
 	    local tmp_file="$(mktemp -u "$SECURE_TMPDIR/XXXXXX")"
 	    echo "Decrypting note..."
 	    if ! gpg -d --quiet --yes "${notefile}.gpg" > "$tmp_file"; then
-	        rm -f "$tmp_file"
+	        shred -u -n 5 -z  "$tmp_file"
 	        die "Error: Decryption failed."
 	    fi
 	    notefile="$tmp_file"
@@ -247,7 +247,7 @@ cmd_show() {
 			[[ -n $note ]] || die "There is no note to put on the clipboard."
 			clip "$note" "$path"
 		fi
-		[[ -n $tmp_file ]] && rm -f "$tmp_file"
+		[[ -n $tmp_file ]] && shred -u -n 5 -z  "$tmp_file"
 	elif [[ -d $PREFIX/$path ]]; then
 		if [[ -z $path ]]; then
 			echo "Note Store"
@@ -279,7 +279,7 @@ cmd_grep() {
 	        local tmp_file="$(mktemp -u "$SECURE_TMPDIR/XXXXXX")"
 	        echo "Decrypting ${notefile#$PREFIX/}..."
 	        if ! gpg -d --quiet --yes "$notefile" > "$tmp_file"; then
-	            rm -f "$tmp_file"
+	            shred -u -n 5 -z  "$tmp_file"
 	            echo "Error: Decryption failed for ${notefile#$PREFIX/}." >&2
 	            continue
 	        fi
@@ -295,7 +295,7 @@ cmd_grep() {
 		notefile="${notefile##*/}"
 		printf "\e[94m%s\e[1m%s\e[0m:\n" "$notefile_dir" "$notefile"
 		echo "$grepresults"
-		[[ -n $tmp_file ]] && rm -f "$tmp_file"
+		[[ -n $tmp_file ]] && shred -u -n 5 -z  "$tmp_file"
 	done < <(find -L "$PREFIX" -path '*/.git' -prune -o \( -iname '*.gpg' -o -type f ! -name '.*' ! -name '*.sig' \) -print0)
 }
 
@@ -345,13 +345,13 @@ cmd_insert() {
 		
 		if [[ $encrypt -eq 1 ]]; then
 		    if ! gpg --quiet --yes --batch -c --passphrase "$passphrase" -o "${notefile}.gpg" "$tmp_file"; then
-		        rm -f "$tmp_file" "${notefile}.gpg"
+		        shred -u -n 5 -z  "$tmp_file" "${notefile}.gpg"
 		        die "Error: Encryption failed."
 		    fi
-		    rm -f "$tmp_file" "$notefile"
+		    shred -u -n 5 -z  "$tmp_file" "$notefile"
 		else
 		    mv "$tmp_file" "$notefile" || die "Error writing note"
-		    rm -f "${notefile}.gpg"
+		    shred -u -n 5 -z  "${notefile}.gpg"
 		fi
 	else
 		echo "Enter note for $path:"
@@ -360,13 +360,13 @@ cmd_insert() {
 		
 		if [[ $encrypt -eq 1 ]]; then
 		    if ! echo "$note" | gpg --quiet --yes --batch -c --passphrase "$passphrase" -o "${notefile}.gpg"; then
-		        rm -f "${notefile}.gpg"
+		        shred -u -n 5 -z  "${notefile}.gpg"
 		        die "Error: Encryption failed."
 		    fi
-		    rm -f "$notefile"
+		    shred -u -n 5 -z  "$notefile"
 		else
 		    echo "$note" > "$notefile" || die "Error writing note"
-		    rm -f "${notefile}.gpg"
+		    shred -u -n 5 -z  "${notefile}.gpg"
 		fi
 	fi
 	
@@ -399,7 +399,7 @@ cmd_edit() {
 	    original_encrypted=1
 	    echo "Decrypting note..."
 	    if ! gpg -d --quiet --yes "${notefile}.gpg" > "$tmp_file"; then
-	        rm -f "$tmp_file"
+	        shred -u -n 5 -z  "$tmp_file"
 	        die "Error: Decryption failed."
 	    fi
 	elif [[ -f "$notefile" ]]; then
@@ -423,11 +423,11 @@ cmd_edit() {
 	        echo
 	        if [[ "$passphrase" == "$passphrase_again" ]]; then
 	            if gpg --quiet --yes --batch -c --passphrase "$passphrase" -o "${notefile}.gpg" "$tmp_file"; then
-	                rm -f "$notefile" "$tmp_file"
+	                shred -u -n 5 -z  "$notefile" "$tmp_file"
 	                notefile="${notefile}.gpg"
 	                break
 	            else
-	                rm -f "${notefile}.gpg"
+	                shred -u -n 5 -z  "${notefile}.gpg"
 	                die "Error: Encryption failed."
 	            fi
 	        else
@@ -436,11 +436,11 @@ cmd_edit() {
 	    done
 	else
 	    if diff -q "$tmp_file" "$notefile" &>/dev/null && [[ -f "$notefile" ]]; then
-	        rm -f "$tmp_file"
+	        shred -u -n 5 -z  "$tmp_file"
 	        die "Note unchanged."
 	    fi
 	    mv "$tmp_file" "$notefile" || die "Could not write to $notefile"
-	    rm -f "${notefile}.gpg"
+	    shred -u -n 5 -z  "${notefile}.gpg"
 	fi
 	
 	git_add_file "$notefile" "$action note for $path using ${EDITOR:-vi}."
